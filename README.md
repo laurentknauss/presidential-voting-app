@@ -8,3 +8,5 @@
 **Also Inherits from UUPSUpgradeable and ReentrancyGuardUpgradeable for secure transfer of funds**  
 
 **A person willing to cast his/her vote is required to hold a minimum of 100 usdc coins on their web3 wallet upon time of voting**
+
+**A voter can claim a refund of their staked funds once voting period ends**
