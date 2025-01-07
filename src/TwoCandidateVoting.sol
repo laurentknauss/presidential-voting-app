@@ -9,7 +9,7 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
+import "@openzeppelin/contracts/utils/struct/BitMaps.sol";
 
 
 /// @title A contract for token-gated voting between two candidates
@@ -50,8 +50,12 @@ contract TwoCandidateVoting is
 
     /*//////////////////////////////////////////////////////////////
                                 MAPPINGS
-    //////////////////////////////////////////////////////////////*/
-    mapping(address => bool) public hasVoted;
+    ////////////////////////////////////////////////////////////////*/
+    using BitMaps for BitMaps.BitMap;
+    // Bitmap to track voter status (hasVoted or not) 
+    BitMaps.BitMap private hasVoted;
+
+    
     mapping(address => uint256) public voterUSDCBalance; 
 
     
@@ -59,7 +63,7 @@ contract TwoCandidateVoting is
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
-    event Voted(address indexed voter, uint256 candidate);
+    event VoterStatusUpdated(address indexed voter, bool hasVoted);
     event VotingFinalized(uint256 winningCandidate);
     event Refunded(address indexed voter, uint256 amount);
 
@@ -104,6 +108,8 @@ contract TwoCandidateVoting is
     /// @param _candidateIndex The index of the candidate to vote for (0 or 1)
     /// @dev Checks eligibility and ensures each address can only vote once
     function vote(uint256 _candidateIndex) external onlyEligible {
+        uint256 voterIndex = uint256(uint160(msg.sender));
+        require(!hasVoted.get(voterIndex), "Already voted"); 
         require(block.timestamp < votingEndTime, "Voting period ended");
         require(!hasVoted[msg.sender], "Already voted");
         require(_candidateIndex == 0 || _candidateIndex == 1, "Invalid candidate index");
@@ -116,12 +122,21 @@ contract TwoCandidateVoting is
             numVotesForCandidate2++;
         }
 
-        hasVoted[msg.sender] = true;
+        // Mark as voted using BitMaps
+        /// @notice gas saving feature with bitMaps from openzeppelin
+        /// @dev without bitMaps: 1 storage slot  per voter , with bitMaps: 1 storage slot  per 256 voters
+        hasVoted.set(voterIndex); 
         voterUSDCBalance[msg.sender] = requiredToken.balanceOf(msg.sender);
-        emit Voted(msg.sender, _candidateIndex);
+        // only emits the voter's  address 
+        emit VoterStatusUpdated(msg.sender, true); 
     }
 
 
+    function markAsVoted(address voter) external {
+        uint256 voterIndex = uint256(uint160(voter)); 
+        require(!hasVoted.get(voterIndex ), "Already voted"); 
+
+     }
 
     /// @notice Finalizes the voting process and starts the grace period
     /// @dev Can only be called by the contract owner after the voting period has ended
@@ -138,16 +153,24 @@ contract TwoCandidateVoting is
 
 
     /// @notice Allows a voter to claim their USDC refund after the grace period
-    /// @dev Transfers the voter's original USDC balance back to them
+    /// @dev Transfers the voter's original USDC balance back to them adhering to the CEI security pattern 
+    /// @notice The 'nonReentrant' modifier , provided by OpenZeppelin, ennsures that the function can not be called recursively in case of a Re-entrancy attack.
+    /// A malicious contract can thus not re-enter the 'claimRefund' function before the first execution is complete.
     function claimRefund() external nonReentrant {
 
-        // Checks
+        // Checks:  the first phase is to ensure that the conditions for ececuting the function are met. 
+        // This is done by using 'require' and conditional checks before any change in the state or external calls are made.
+
+        // @dev checks if the voting process has been finalized-If not, the function will revert with a message 
         require(votingFinalized, "Voting not finalized");
+        // @dev ensures that the current timestamps is greater than or equal to the 'refundStartTime' that indicates the refund period has started-If not, the function reverts with a  message.
         require(block.timestamp >= refundStartTime, "Refund period not started");
+        // verifies that the sender (voter) has cast their vote-if not, the function reverts with a message. 
         require(hasVoted[msg.sender], "Did not vote");
+        // @dev confirms that the voter has a non-zero balance to be refunded.If their balance is already zero, indicating they have already been refunded, the function reverts with a message.
         require(voterUSDCBalance[msg.sender] > 0, "Already refunded");
 
-        /// @dev ensure the refund recipient is not the zero address 
+        /// @dev ensure the refund recipient is not the zero address , preventing a transfer to an invalid address
         if (msg.sender == address(0)) {
             revert("Refund recipient cannot be the zero address");
         }
@@ -156,16 +179,22 @@ contract TwoCandidateVoting is
         if (msg.sender == owner()) {
             revert("Refund recipient cannot be the owner address");
         }
+        // @notice Those above checks ensure the function can only proceeed if all conditiosn are met , maintaining integrity of refund process  
 
         uint256 refundAmount = voterUSDCBalance[msg.sender];
 
-        // Effects
+        // Effects : second step involving making necessary state changes-done after all checks passed.
+        // @dev After confirming that the voter is eligible to a refund , the state of the contract is updated by resetting the sender 's USDC balance to zero. 
+        // This prevents the same voter from claiming a refund multiple times, ensuring they can not re-enter the function .
         voterUSDCBalance[msg.sender] = 0;
 
-        // Interactions 
+        // Interactions : third step involves interacting with external contracts or addresses (the latter being the case here) 
+        // Those interactions are done after the state changes have been made, minimizing re-entrancy attacks attempts.
+        // @dev the function then transfers the amount from the contract to the sender using 'transfer()' .
+
         require(requiredToken.transfer(msg.sender, refundAmount), "Refund transfer failed");
 
-
+        // @dev finally, the contract emits the 'Refunded' event , notifying listeners about the refund action, with details about the refunded address and amount
         emit Refunded(msg.sender, refundAmount);
     }
 
